@@ -1,66 +1,58 @@
-# Use the official Debian-hosted Python image
 FROM python:3.11-slim-bookworm
 
 ARG DEBIAN_PACKAGES="build-essential git curl wget unzip gzip"
-
-# Prevent apt from showing prompts
 ENV DEBIAN_FRONTEND=noninteractive
-
-# Python wants UTF-8 locale
 ENV LANG=C.UTF-8
-
-# Tell pipenv where the shell is. This allows us to use "pipenv shell" as a
-# container entry point.
 ENV PYENV_SHELL=/bin/bash
-
-# Tell Python to disable buffering so we don't lose any logs.
 ENV PYTHONUNBUFFERED=1
-
-# Tell uv to copy packages from the wheel into the site-packages
 ENV UV_LINK_MODE=copy
 ENV UV_PROJECT_ENVIRONMENT=/.venv
 
-RUN set -ex; \
-    for i in $(seq 1 8); do mkdir -p "/usr/share/man/man${i}"; done && \
+# --- Fix Debian invalid GPG signature issue ---
+RUN set -eux; \
+    # Remove broken lists if they exist
+    rm -rf /var/lib/apt/lists/*; \
+    # Replace expired Debian keys manually
+    mkdir -p /usr/share/keyrings; \
+    curl -fsSL https://ftp-master.debian.org/keys/archive-key-12.asc | tee /usr/share/keyrings/debian-archive-key-12.asc > /dev/null; \
+    curl -fsSL https://ftp-master.debian.org/keys/archive-key-12-security.asc | tee /usr/share/keyrings/debian-archive-key-12-security.asc > /dev/null; \
+    curl -fsSL https://ftp-master.debian.org/keys/archive-key-12-stable.asc | tee /usr/share/keyrings/debian-archive-key-12-stable.asc > /dev/null; \
+    echo "deb [signed-by=/usr/share/keyrings/debian-archive-key-12.asc] http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware" > /etc/apt/sources.list; \
+    echo "deb [signed-by=/usr/share/keyrings/debian-archive-key-12-security.asc] http://deb.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list; \
+    echo "deb [signed-by=/usr/share/keyrings/debian-archive-key-12-stable.asc] http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list; \
+    \
     apt-get update && \
     apt-get upgrade -y && \
-    apt-get install -y --no-install-recommends $DEBIAN_PACKAGES && \
-    apt-get install -y lsb-release && \
-    apt-get install -y --no-install-recommends software-properties-common apt-transport-https ca-certificates gnupg2 gnupg-agent curl openssh-client && \
-    curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add - && \
-    echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list && \
-    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add - && \
-    echo "deb http://packages.cloud.google.com/apt gcsfuse-bionic main" > /etc/apt/sources.list.d/gcsfuse.list && \ 
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        $DEBIAN_PACKAGES \
+        lsb-release \
+        apt-transport-https \
+        software-properties-common \
+        openssh-client; \
+    \
+    # --- Add Google Cloud SDK & GCSFuse repositories securely ---
+    curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | tee /usr/share/keyrings/cloud.google.gpg > /dev/null; \
+    echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" > /etc/apt/sources.list.d/google-cloud-sdk.list; \
+    echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] http://packages.cloud.google.com/apt gcsfuse-bionic main" > /etc/apt/sources.list.d/gcsfuse.list; \
+    \
     apt-get update && \
-    apt-get install -y  gcsfuse && \
-    apt-get install -y --no-install-recommends google-cloud-sdk && \
-    apt-get install -y libnss3 libcurl4 && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/* && \
+    apt-get install -y --no-install-recommends google-cloud-sdk gcsfuse libnss3 libcurl4; \
+    \
+    apt-get clean && rm -rf /var/lib/apt/lists/*; \
+    \
     pip install --no-cache-dir --upgrade pip && \
     pip install uv && \
+    \
     useradd -ms /bin/bash app -d /home/app -u 1000 && \
-    mkdir -p /app && \
-    chown app:app /app && \
-    mkdir -p /.venv && \
-    chown app:app /.venv
+    mkdir -p /app /.venv /mnt/gcs_data && \
+    chown -R app:app /app /.venv /mnt/gcs_data
 
-RUN mkdir -p /mnt/gcs_data && chown app:app /mnt/gcs_data
-
-
-# Switch to the new user
-#USER app # Keep the user as root since we need for mounting
 WORKDIR /app
 
-# Copy dependency files first for better layer caching
 COPY --chown=app:app pyproject.toml uv.lock* ./
-
-# Install dependencies in a separate layer for better caching
 RUN uv sync --frozen
-
-# Copy the rest of the source code
 COPY --chown=app:app . ./
 
-# Entry point
-#ENTRYPOINT ["pipenv","shell"]
-ENTRYPOINT ["/bin/bash","./docker-entrypoint.sh"]
+ENTRYPOINT ["/bin/bash", "./docker-entrypoint.sh"]
